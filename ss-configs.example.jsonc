@@ -1,0 +1,22 @@
+// ssx profile definitions.
+//
+// Format: JSON with full-line // comments (like this one) — no trailing
+// commas, no inline comments after values.
+//
+// Each top-level key is a profile name; its value is a complete
+// shadowsocks-libev (ss-local) client config object. Any key ss-local
+// understands (e.g. "plugin", "plugin_opts", "fast_open") passes through.
+//
+// Copy this file to ss-configs.jsonc, fill in real values, then run
+// `make install` to (re)deploy it to ~/.config/ssx/ss-configs.jsonc.
+{
+  "example": {
+    "server": "REPLACE_ME",
+    "server_port": 8388,
+    "local_address": "127.0.0.1",
+    "local_port": 1080,
+    "password": "REPLACE_ME",
+    "timeout": 600,
+    "method": "aes-128-gcm"
+  }
+}

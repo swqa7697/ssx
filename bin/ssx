@@ -1,0 +1,383 @@
+#!/bin/bash
+#
+# ssx — manage shadowsocks-libev (ss-local) client connections on macOS.
+#
+# Profiles live in ~/.config/ssx/ss-configs.jsonc: a JSON object mapping
+# profile names to complete ss-local client config objects. Full-line
+# // comments are allowed; trailing commas are not.
+#
+# Targets the macOS system bash (3.2) — no bash-4+ features.
+
+set -euo pipefail
+
+readonly SSX_VERSION="0.1.0"
+
+readonly CONFIG_DIR="${SSX_CONFIG_DIR:-${HOME}/.config/ssx}"
+readonly CONFIG_FILE="${CONFIG_DIR}/ss-configs.jsonc"
+readonly ACTIVE_JSON="${CONFIG_DIR}/active.json"
+readonly CURRENT_FILE="${CONFIG_DIR}/current"
+readonly PID_FILE="${CONFIG_DIR}/ss-local.pid"
+
+if [[ -t 2 ]]; then
+  readonly C_RED=$'\033[31m'
+  readonly C_YELLOW=$'\033[33m'
+  readonly C_GREEN=$'\033[32m'
+  readonly C_RESET=$'\033[0m'
+else
+  readonly C_RED=''
+  readonly C_YELLOW=''
+  readonly C_GREEN=''
+  readonly C_RESET=''
+fi
+
+die() {
+  echo "${C_RED}error:${C_RESET} $*" >&2
+  exit 1
+}
+
+warn() {
+  echo "${C_YELLOW}warning:${C_RESET} $*" >&2
+}
+
+info() {
+  echo "$*" >&2
+}
+
+require_deps() {
+  command -v ss-local >/dev/null 2>&1 ||
+    die "ss-local not found — run 'make install' (or: brew install shadowsocks-libev)"
+  command -v jq >/dev/null 2>&1 ||
+    die "jq not found — run 'make install' (or: brew install jq)"
+  command -v nc >/dev/null 2>&1 ||
+    die "nc not found (expected at /usr/bin/nc on macOS)"
+}
+
+ensure_config() {
+  [[ -s "${CONFIG_FILE}" ]] ||
+    die "no config at ${CONFIG_FILE} — run 'make install', then edit that file to add profiles"
+}
+
+# Outputs CONFIG_FILE with full-line // comments removed. grep exits 1 when
+# every line is filtered out, which would abort under pipefail — hence || true.
+strip_jsonc() {
+  grep -vE '^[[:space:]]*//' "${CONFIG_FILE}" || true
+}
+
+check_config_syntax() {
+  strip_jsonc | jq -e 'type == "object"' >/dev/null 2>&1 ||
+    die "cannot parse ${CONFIG_FILE} — it must be a JSON object; only full-line // comments are allowed and trailing commas are not"
+}
+
+require_profiles() {
+  local count
+  count="$(strip_jsonc | jq -r 'keys | length')"
+  [[ "${count}" -gt 0 ]] ||
+    die "no profiles defined in ${CONFIG_FILE} — add one (see ss-configs.example.jsonc)"
+}
+
+profile_names() {
+  strip_jsonc | jq -r 'keys_unsorted[]'
+}
+
+profile_names_csv() {
+  strip_jsonc | jq -r 'keys_unsorted | join(", ")'
+}
+
+profile_exists() {
+  strip_jsonc | jq -e --arg p "$1" 'has($p)' >/dev/null 2>&1
+}
+
+read_current() {
+  cat "${CURRENT_FILE}" 2>/dev/null || true
+}
+
+write_current() {
+  echo "$1" >"${CURRENT_FILE}"
+}
+
+# Renders profile $1 into ACTIVE_JSON (mode 600) for `ss-local -c`, defaulting
+# local_address to 127.0.0.1, then validates the fields ss-local requires.
+write_active_json() {
+  local profile="$1"
+  local missing
+  (
+    umask 077
+    strip_jsonc | jq -e --arg p "${profile}" \
+      '.[$p] + {local_address: (.[$p].local_address // "127.0.0.1")}' \
+      >"${ACTIVE_JSON}"
+  ) || die "failed to render profile '${profile}'"
+  chmod 600 "${ACTIVE_JSON}"
+  missing="$(jq -r '
+    def miss(f): if has(f) then empty else f end;
+    [miss("server"), miss("server_port"), miss("local_port"), miss("method"),
+     (if has("password") or has("key") then empty else "password" end)]
+    | join(", ")' "${ACTIVE_JSON}")"
+  [[ -z "${missing}" ]] ||
+    die "profile '${profile}' is missing required field(s): ${missing}"
+}
+
+active_host() {
+  jq -r '.local_address' "${ACTIVE_JSON}"
+}
+
+active_port() {
+  jq -r '.local_port' "${ACTIVE_JSON}"
+}
+
+# Prints the live ss-local pid and returns 0; otherwise removes any stale
+# pidfile (ss-local never deletes it itself, even on clean shutdown), prints
+# nothing, and returns 1. The single source of truth for "running".
+daemon_pid() {
+  local pid comm
+  [[ -f "${PID_FILE}" ]] || return 1
+  pid="$(cat "${PID_FILE}" 2>/dev/null)"
+  if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
+    rm -f "${PID_FILE}"
+    return 1
+  fi
+  # Guard against PID recycling: only trust pids that still are ss-local.
+  comm="$(ps -p "${pid}" -o comm= 2>/dev/null)"
+  case "${comm}" in
+    *ss-local) ;;
+    *)
+      rm -f "${PID_FILE}"
+      return 1
+      ;;
+  esac
+  echo "${pid}"
+}
+
+port_listening() {
+  nc -z "$1" "$2" >/dev/null 2>&1
+}
+
+# Starts ss-local for profile $1 and waits until it is healthy. ss-local can
+# exit 0 yet die moments later (port conflict, bad cipher), so success means:
+# pid alive AND the SOCKS port accepts connections.
+start_daemon() {
+  local profile="$1"
+  local host port pid attempt
+  write_active_json "${profile}"
+  host="$(active_host)"
+  port="$(active_port)"
+
+  if port_listening "${host}" "${port}"; then
+    die "${host}:${port} is already in use by another process — stop it or change local_port"
+  fi
+
+  write_current "${profile}"
+  ss-local -c "${ACTIVE_JSON}" -f "${PID_FILE}" || true
+
+  for ((attempt = 1; attempt <= 25; attempt++)); do
+    if pid="$(daemon_pid)"; then
+      if port_listening "${host}" "${port}"; then
+        info "${C_GREEN}connected:${C_RESET} '${profile}' — SOCKS5 on ${host}:${port} (pid ${pid})"
+        return 0
+      fi
+    elif [[ "${attempt}" -gt 3 ]]; then
+      break
+    fi
+    sleep 0.2
+  done
+
+  rm -f "${PID_FILE}"
+  die "ss-local failed to start for '${profile}' — debug with: ss-local -c ${ACTIVE_JSON} -v"
+}
+
+# Stops the daemon recorded in PID_FILE. Returns 1 when nothing was running.
+# Kills only our own pid (never pkill — other ss-local instances may exist).
+stop_daemon() {
+  local pid attempt
+  if ! pid="$(daemon_pid)"; then
+    return 1
+  fi
+  kill "${pid}" 2>/dev/null || true
+  for ((attempt = 1; attempt <= 15; attempt++)); do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      break
+    fi
+    sleep 0.2
+  done
+  if kill -0 "${pid}" 2>/dev/null; then
+    warn "ss-local (pid ${pid}) ignored SIGTERM — sending SIGKILL"
+    kill -9 "${pid}" 2>/dev/null || true
+  fi
+  rm -f "${PID_FILE}"
+  return 0
+}
+
+cmd_on() {
+  require_deps
+  ensure_config
+  check_config_syntax
+  require_profiles
+  local profile running_pid
+  profile="${1:-$(read_current)}"
+  [[ -n "${profile}" ]] ||
+    die "no profile selected — usage: ssx on <profile>  (available: $(profile_names_csv))"
+  profile_exists "${profile}" ||
+    die "unknown profile '${profile}' (available: $(profile_names_csv))"
+
+  if running_pid="$(daemon_pid)"; then
+    if [[ "$(read_current)" == "${profile}" ]]; then
+      info "already connected: '${profile}' (pid ${running_pid}) — SOCKS5 on $(active_host):$(active_port)"
+      return 0
+    fi
+    info "switching from '$(read_current)' to '${profile}'..."
+    stop_daemon || true
+  fi
+  start_daemon "${profile}"
+}
+
+cmd_off() {
+  if stop_daemon; then
+    info "disconnected"
+  else
+    info "not connected — nothing to do"
+  fi
+}
+
+cmd_use() {
+  require_deps
+  ensure_config
+  check_config_syntax
+  require_profiles
+  local profile="${1:-}"
+  [[ -n "${profile}" ]] ||
+    die "usage: ssx use <profile>  (available: $(profile_names_csv))"
+  profile_exists "${profile}" ||
+    die "unknown profile '${profile}' (available: $(profile_names_csv))"
+
+  if daemon_pid >/dev/null; then
+    if [[ "$(read_current)" == "${profile}" ]]; then
+      info "already connected: '${profile}'"
+      return 0
+    fi
+    write_current "${profile}"
+    info "reconnecting with '${profile}'..."
+    stop_daemon || true
+    start_daemon "${profile}"
+  else
+    write_current "${profile}"
+    info "current profile set to '${profile}' — run 'ssx on' to connect"
+  fi
+}
+
+cmd_list() {
+  require_deps
+  ensure_config
+  check_config_syntax
+  require_profiles
+  local current name marker suffix running
+  current="$(read_current)"
+  running="no"
+  if daemon_pid >/dev/null; then
+    running="yes"
+  fi
+  while IFS= read -r name; do
+    marker=" "
+    suffix=""
+    if [[ "${name}" == "${current}" ]]; then
+      marker="*"
+      if [[ "${running}" == "yes" ]]; then
+        suffix="  (running)"
+      fi
+    fi
+    echo "${marker} ${name}${suffix}"
+  done < <(profile_names)
+}
+
+cmd_status() {
+  require_deps
+  local pid current host port listening
+  current="$(read_current)"
+  if pid="$(daemon_pid)"; then
+    host="?"
+    port="?"
+    if [[ -f "${ACTIVE_JSON}" ]]; then
+      host="$(active_host)"
+      port="$(active_port)"
+    fi
+    listening="no"
+    if port_listening "${host}" "${port}"; then
+      listening="yes"
+    fi
+    echo "state:     connected"
+    echo "profile:   ${current}"
+    echo "pid:       ${pid}"
+    echo "socks5:    ${host}:${port}"
+    echo "listening: ${listening}"
+    return 0
+  fi
+  echo "state:   disconnected"
+  if [[ -n "${current}" ]]; then
+    echo "profile: ${current} (used by 'ssx on')"
+  fi
+  return 1
+}
+
+cmd_env() {
+  require_deps
+  local host port
+  if ! daemon_pid >/dev/null; then
+    warn "not connected — run 'ssx on' first"
+    return 1
+  fi
+  host="$(active_host)"
+  port="$(active_port)"
+  # socks5h:// resolves DNS through the proxy (no local DNS leaks).
+  echo "export ALL_PROXY=\"socks5h://${host}:${port}\""
+  echo "export all_proxy=\"socks5h://${host}:${port}\""
+  info "apply with: eval \"\$(ssx env)\""
+}
+
+cmd_version() {
+  echo "ssx ${SSX_VERSION}"
+}
+
+cmd_help() {
+  cat <<EOF
+ssx ${SSX_VERSION} — shadowsocks-libev connection manager (SOCKS5 listener only)
+
+Usage: ssx <command> [args]
+
+Commands:
+  on [profile]     Connect (start ss-local). Uses the current profile if omitted.
+  off              Disconnect.
+  use <profile>    Set the current profile; reconnects if currently connected.
+  list, ls         List profiles (* = current).
+  status, st       Show connection state (exit 0 connected / 1 disconnected).
+  env              Print proxy exports — apply with: eval "\$(ssx env)"
+  version          Print version.
+  help             Show this help.
+
+Profiles: ${CONFIG_FILE}
+  JSON object of name -> ss-local config; full-line // comments allowed.
+  ssx never touches macOS system proxy settings.
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  if [[ $# -gt 0 ]]; then
+    shift
+  fi
+  case "${cmd}" in
+    on) cmd_on "$@" ;;
+    off) cmd_off ;;
+    use | switch) cmd_use "$@" ;;
+    list | ls) cmd_list ;;
+    status | st) cmd_status ;;
+    env) cmd_env ;;
+    version | -V | --version) cmd_version ;;
+    help | -h | --help) cmd_help ;;
+    *)
+      cmd_help >&2
+      echo "" >&2
+      echo "${C_RED}error:${C_RESET} unknown command: ${cmd}" >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
