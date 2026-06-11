@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-VERSION := $(shell cat VERSION 2>/dev/null | tr -d '\n' || echo "0.1.0")
+VERSION := $(shell tr -d '[:space:]' < VERSION 2>/dev/null)
 
 # User-overridable install locations, e.g. `make install BIN_DIR=~/bin`.
 BIN_NAME ?= ssx

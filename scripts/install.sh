@@ -75,9 +75,19 @@ seed_config() {
   fi
 }
 
+# Installs bin/ssx with the release version from the VERSION file frozen into
+# its SSX_VERSION assignment, so the installed copy never depends on the repo.
 install_bin() {
-  install -m 755 "${REPO_ROOT}/bin/ssx" "${BIN_DIR}/${BIN_NAME}"
-  ok "CLI installed: ${BIN_DIR}/${BIN_NAME}"
+  local version tmp
+  version="$(tr -d '[:space:]' <"${REPO_ROOT}/VERSION")" && [[ -n "${version}" ]] ||
+    die "VERSION file missing or empty in ${REPO_ROOT}"
+  tmp="$(mktemp)"
+  sed "s/^SSX_VERSION=\"\"\$/SSX_VERSION=\"${version}\"/" "${REPO_ROOT}/bin/ssx" >"${tmp}"
+  grep -q "^SSX_VERSION=\"${version}\"\$" "${tmp}" ||
+    die "failed to freeze version ${version} into ${BIN_NAME} — placeholder not found in bin/ssx"
+  install -m 755 "${tmp}" "${BIN_DIR}/${BIN_NAME}"
+  rm -f "${tmp}"
+  ok "CLI installed: ${BIN_DIR}/${BIN_NAME} (version ${version} frozen)"
   case ":${PATH}:" in
     *":${BIN_DIR}:"*) ;;
     *)

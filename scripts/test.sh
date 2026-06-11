@@ -94,6 +94,15 @@ check "ss-configs.example.jsonc parses as JSONC" rc_is 0
 run "${SSX}" version
 check "version matches VERSION file" out_has "$(cat "${REPO_ROOT}/VERSION")"
 
+# Simulates install.sh's version freeze: a frozen copy in the sandbox has no
+# ../VERSION beside it, so it must report the baked-in version, not a fallback.
+FROZEN="${SANDBOX}/ssx-frozen"
+sed 's/^SSX_VERSION=""$/SSX_VERSION="9.9.9-test"/' "${SSX}" >"${FROZEN}"
+chmod +x "${FROZEN}"
+run "${FROZEN}" version
+check "frozen bin reports baked-in version" out_has "9.9.9-test"
+check "  ...and exits 0" rc_is 0
+
 # --- install config guard ----------------------------------------------------
 # install.sh aborts before ensure_deps.sh when ss-configs.jsonc is missing or
 # empty, so these paths are safe to exercise offline from a fake repo root.
