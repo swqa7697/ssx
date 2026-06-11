@@ -1,4 +1,4 @@
-# ss-proxy
+# ssx
 
 `ssx` — a tiny bash CLI to manage [shadowsocks-libev](https://github.com/shadowsocks/shadowsocks-libev) client connections on macOS. Turn the proxy on/off with one command and switch between named server profiles.
 
