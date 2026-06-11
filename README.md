@@ -100,6 +100,7 @@ make help      # all targets
 make test      # sandboxed offline smoke suite — never touches ~/.config/ssx
 make format    # shfmt (brew-installed lazily)
 make lint      # shellcheck (brew-installed lazily)
+make tag       # tag HEAD with the version from VERSION and push it (main only)
 make clean     # remove test sandboxes (.tmp/)
 ```
 

@@ -10,7 +10,7 @@ CONFIG_DIR ?= $(HOME)/.config/ssx
 
 export BIN_NAME BIN_DIR CONFIG_DIR
 
-.PHONY: help install setup uninstall test format tidy lint clean
+.PHONY: help install setup uninstall test format tidy lint tag clean
 
 help: ## Show this help message
 	@echo "ssx $(VERSION) — shadowsocks-libev connection manager for macOS"
@@ -35,6 +35,16 @@ tidy: format ## Alias for format
 
 lint: ## Lint shell scripts with shellcheck
 	@./tidy.sh lint
+
+tag: ## Tag the current HEAD with the version from VERSION and push it (main only)
+	@branch="$$(git rev-parse --abbrev-ref HEAD)"; \
+	  if [ "$$branch" != "main" ]; then \
+	    echo "refusing to tag: on branch '$$branch', not main" >&2; \
+	    exit 1; \
+	  fi
+	@git tag -a "$(VERSION)" -m "Release $(VERSION)"
+	@git push origin "$(VERSION)"
+	@echo "tagged and pushed $(VERSION)"
 
 clean: ## Remove test sandboxes and scratch files
 	@rm -rf .tmp
