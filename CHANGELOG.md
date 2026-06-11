@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-06-10
+
+### Added
+
+- Add GitHub Actions CI running format check, lint, and the offline test suite on macOS
+- Add `make tag` to tag the current HEAD with the version from `VERSION` and push the tag (refuses to run off `main`)
+
+### Changed
+
+- Resolve the CLI version from the `VERSION` file at runtime in a repo checkout, and freeze it into the installed copy during install so it no longer depends on the repo
+
 ## [0.1.0] - 2026-06-10
 
 ### Added

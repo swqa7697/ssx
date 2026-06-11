@@ -10,7 +10,15 @@
 
 set -euo pipefail
 
-readonly SSX_VERSION="0.1.0"
+# Empty in a repo checkout (resolved from the VERSION file below); install.sh
+# freezes the release version into this assignment in the installed copy.
+SSX_VERSION=""
+if [[ -z "${SSX_VERSION}" ]]; then
+  SSX_VERSION="$(tr -d '[:space:]' <"$(dirname "${BASH_SOURCE[0]}")/../VERSION" 2>/dev/null)" ||
+    SSX_VERSION=""
+  [[ -n "${SSX_VERSION}" ]] || SSX_VERSION="unknown"
+fi
+readonly SSX_VERSION
 
 readonly CONFIG_DIR="${SSX_CONFIG_DIR:-${HOME}/.config/ssx}"
 readonly CONFIG_FILE="${CONFIG_DIR}/ss-configs.jsonc"

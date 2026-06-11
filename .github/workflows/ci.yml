@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    # ssx targets macOS: tests need BSD stat, brew's ss-local, and exercise
+    # the system bash 3.2 compatibility requirement.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install shfmt shellcheck shadowsocks-libev jq
+
+      - name: Format check
+        run: |
+          make format
+          git diff --exit-code
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test
